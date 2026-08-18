@@ -4,7 +4,7 @@ import socket
 import struct
 from dataclasses import dataclass
 from io import BytesIO
-from typing import List
+from typing import List, Literal, TypeAlias
 
 random.seed(1)
 
@@ -61,22 +61,28 @@ def decode_name_simple(reader):
 
 
 def decode_name(reader):
+    return decode_name_wrapper(reader, 10)
+
+
+def decode_name_wrapper(reader, count):
+    if count <= 0:
+        raise ValueError("Too many indirections in DNS name decoding")
     parts = []
     while (length := reader.read(1)[0]) != 0:
         if length & 0b1100_0000:
-            parts.append(decode_compressed_name(length, reader))
+            parts.append(decode_compressed_name(length, reader, count))
             break
         else:
             parts.append(reader.read(length))
     return b".".join(parts)
 
 
-def decode_compressed_name(length, reader):
+def decode_compressed_name(length, reader, count):
     pointer_bytes = bytes([length & 0b0011_1111]) + reader.read(1)
     pointer = struct.unpack("!H", pointer_bytes)[0]
     current_pos = reader.tell()
     reader.seek(pointer)
-    result = decode_name(reader)
+    result = decode_name_wrapper(reader, count - 1)
     reader.seek(current_pos)
     return result
 
@@ -85,6 +91,13 @@ TYPE_A = 1
 TYPE_NS = 2
 TYPE_CNAME = 5
 CLASS_IN = 1
+
+DNSRecordType: TypeAlias = Literal["A", "NS", "CNAME", 1, 2, 5]
+TYPE_MAP = {
+    "A": TYPE_A,
+    "NS": TYPE_NS,
+    "CNAME": TYPE_CNAME,
+}
 
 
 def build_query(domain_name, record_type):
@@ -196,8 +209,12 @@ def get_nameserver(packet):
             return x.data.decode("utf-8")
 
 
-def resolve(domain_name, record_type):
+def resolve(domain_name: str, record_type: DNSRecordType) -> str:
     nameserver = "198.41.0.4"
+    if isinstance(record_type, str):
+        record_type = TYPE_MAP.get(record_type.upper())
+        if record_type is None:
+            raise ValueError(f"Invalid record type: {record_type}")
     while True:
         print(f"Querying {nameserver} for {domain_name}")
         response = send_query(nameserver, domain_name, record_type)
@@ -217,7 +234,7 @@ def resolve(domain_name, record_type):
 
 if __name__ == "__main__":
     print("Resolving domain names...")
-    res = resolve("twitter.com", TYPE_A)
+    res = resolve("twitter.com", "A")
     print("Got IP:", res)
     print()
 
@@ -226,3 +243,14 @@ if __name__ == "__main__":
     res = resolve("docs.helpscout.com", TYPE_A)
     print("Got IP:", res)
     print()
+
+    data1 = "129581800001000100000000076578616d706c6503636f6d0000010001c01d000100010000012c000408080808"
+    try:
+        parse_dns_packet(bytes.fromhex(data1))
+    except ValueError as e:
+        print("Correctly caught error for self-referencing pointer:", e)
+    data2 = "123481800001000100000000076578616d706c6503636f6d0000010001c01d000100010000012c000408080808"
+    try:
+        parse_dns_packet(bytes.fromhex(data2))
+    except ValueError as e:
+        print("Correctly caught error for loop pointer:", e)
