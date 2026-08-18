@@ -83,6 +83,7 @@ def decode_compressed_name(length, reader):
 
 TYPE_A = 1
 TYPE_NS = 2
+TYPE_CNAME = 5
 CLASS_IN = 1
 
 
@@ -113,6 +114,8 @@ def parse_record(reader):
         data = decode_name(reader)
     elif type_ == TYPE_A:
         data = ip_to_string(reader.read(data_len))
+    elif type_ == TYPE_CNAME:
+        data = decode_name(reader)
     else:
         data = reader.read(data_len)
     return DNSRecord(name, type_, class_, ttl, data)
@@ -138,13 +141,22 @@ def parse_dns_packet(data):
     return DNSPacket(header, questions, answers, authorities, additionals)
 
 
-def send_query(ip_address, domain_name, record_type):
-    query = build_query(domain_name, record_type)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(query, (ip_address, 53))
-
-    data, _ = sock.recvfrom(1024)
-    return parse_dns_packet(data)
+def send_query(ip_address, domain_name, record_type, retries=3, timeout=5):
+    for attempt in range(retries):
+        query = build_query(domain_name, record_type)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(query, (ip_address, 53))
+            data, _ = sock.recvfrom(1024)
+            return parse_dns_packet(data)
+        except socket.timeout:
+            print(
+                f"    Timeout querying {ip_address} (attempt {attempt + 1}/{retries})"
+            )
+        finally:
+            sock.close()
+    raise socket.timeout(f"No response from {ip_address} after {retries} attempts")
 
 
 def ip_to_string(ip):
@@ -152,13 +164,7 @@ def ip_to_string(ip):
 
 
 def lookup_domain(domain_name):
-    query = build_query(domain_name, TYPE_A)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(query, ("8.8.8.8", 53))
-
-    # get the response
-    data, _ = sock.recvfrom(1024)
-    response = parse_dns_packet(data)
+    response = send_query("8.8.8.8", domain_name, TYPE_A)
     return ip_to_string(response.answers[0].data)
 
 
@@ -167,6 +173,13 @@ def get_answer(packet):
     for x in packet.answers:
         if x.type_ == TYPE_A:
             return x.data
+
+
+def get_cname(packet):
+    # return the first CNAME record in the Answer section
+    for x in packet.answers:
+        if x.type_ == TYPE_CNAME:  # CNAME type
+            return x.data.decode("utf-8")
 
 
 def get_nameserver_ip(packet):
@@ -190,15 +203,26 @@ def resolve(domain_name, record_type):
         response = send_query(nameserver, domain_name, record_type)
         if ip := get_answer(response):
             return ip
+        elif cname := get_cname(response):
+            return resolve(cname, record_type)
         elif nsIP := get_nameserver_ip(response):
             nameserver = nsIP
         # New case: look up the nameserver's IP address if there is one
         elif ns_domain := get_nameserver(response):
             nameserver = resolve(ns_domain, TYPE_A)
         else:
+            # print(response)
             raise Exception("something went wrong")
 
 
 if __name__ == "__main__":
+    print("Resolving domain names...")
     res = resolve("twitter.com", TYPE_A)
     print("Got IP:", res)
+    print()
+
+    # CNAME example
+    print("Resolving domain names...")
+    res = resolve("docs.helpscout.com", TYPE_A)
+    print("Got IP:", res)
+    print()
