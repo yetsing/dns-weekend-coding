@@ -2,7 +2,9 @@ import dataclasses
 import random
 import socket
 import struct
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from io import BytesIO
 from typing import List, Literal, TypeAlias
 
@@ -209,6 +211,7 @@ def get_nameserver(packet):
             return x.data.decode("utf-8")
 
 
+@lru_cache(maxsize=10)
 def resolve(domain_name: str, record_type: DNSRecordType) -> str:
     nameserver = "198.41.0.4"
     if isinstance(record_type, str):
@@ -254,3 +257,9 @@ if __name__ == "__main__":
         parse_dns_packet(bytes.fromhex(data2))
     except ValueError as e:
         print("Correctly caught error for loop pointer:", e)
+
+    # Test cache
+    s = time.monotonic()
+    resolve("twitter.com", "A")
+    e = time.monotonic()
+    assert e - s < 0.1, "Cached lookup took too long"
